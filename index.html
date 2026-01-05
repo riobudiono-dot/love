@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Particle Heart ⇄ Charine (Triple Click)</title>
+  <style>
+    html, body { margin:0; height:100%; }
+    body { background:#000; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    .hint{
+      position:fixed; left:50%; bottom:18px; transform:translateX(-50%);
+      color:rgba(255,255,255,0.75);
+      font: 13px/1.2 Arial, Helvetica, sans-serif;
+      user-select:none; pointer-events:none;
+      letter-spacing:.19px;
+      text-align:center;
+      white-space:nowrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hint" id="hint"></div>
+
+  <script>
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: true });
+    const hintEl = document.getElementById("hint");
+
+    const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+    // ==========
+    // TUNING
+    // ==========
+    const PARTICLE_COUNT = 3000;
+
+    const ARRIVE_FORCE   = 0.024;
+    const DAMPING        = 0.86;
+    const SCATTER_FORCE  = 8.5;
+
+    const GLOW           = true;
+
+    // Hover repel (aktif saat mode HEART)
+    const HOVER_REPEL_FORCE = 0.55;
+    const HOVER_RADIUS_NORM = 0.55;
+    const HOVER_DAMP_BOOST  = 0.92;
+
+    // Blink
+    const BLINK_SPEED    = 0.90;
+    const BLINK_STRENGTH = 0.98;
+    const BLINK_WIDTH    = 0.06;
+
+    // Heart size
+    const HEART_SIZE = 0.34;
+
+    // Neon red colors
+    const RED_MAIN   = "rgba(255, 20, 40, 0.98)";
+    const RED_INNER  = "rgba(255, 60, 90, 0.85)";
+    const RED_OUTER  = "rgba(255, 0, 30, 0.55)";
+    const HOT_CORE   = "rgba(255, 255, 255, 0.12)";
+
+    // Text
+    const TEXT_STRING = "C H A R I N E";
+    const TEXT_FONT_FAMILY = "Arial Black, Impact, system-ui, sans-serif";
+    const TEXT_FILL_STYLE = "#ffffff"; // offscreen mask color
+    const TEXT_SAMPLE_STEP = 3;        // makin kecil makin detail (lebih berat)
+
+    // Triple-click detection
+    const TRIPLE_CLICK_WINDOW_MS = 550;
+    let clickCount = 0;
+    let clickTimer = null;
+
+    // Heart placement (untuk hover mapping)
+    let heartCX = 0, heartCY = 0, heartScale = 1;
+
+    // Shape mode
+    let mode = "heart"; // "heart" | "text"
+
+    let targets = [];
+    let particles = [];
+
+    // Pointer state
+    const pointer = { x: 0, y: 0, insideHeart: false };
+
+    function resize(){
+      canvas.width  = Math.floor(innerWidth * DPR);
+      canvas.height = Math.floor(innerHeight * DPR);
+      canvas.style.width = innerWidth + "px";
+      canvas.style.height = innerHeight + "px";
+      ctx.setTransform(1,0,0,1,0,0);
+    }
+
+    window.addEventListener("resize", () => {
+      resize();
+      rebuildTargetsForMode(true);
+    });
+
+    // Heart equation
+    function heartInside(x, y){
+      const a = x*x + y*y - 1;
+      return (a*a*a - x*x*y*y*y) <= 0;
+    }
+
+    function buildHeartTargets(){
+      const out = [];
+
+      const w = canvas.width, h = canvas.height;
+
+      heartCX = w * 0.5;
+      heartCY = h * 0.52;
+      heartScale = Math.min(w, h) * HEART_SIZE;
+
+      const cx = heartCX, cy = heartCY, scale = heartScale;
+
+      const xmin = -1.35, xmax = 1.35;
+      const ymin = -1.35, ymax = 1.35;
+
+      let safety = 0;
+      const maxIters = PARTICLE_COUNT * 70;
+
+      while (out.length < PARTICLE_COUNT && safety < maxIters){
+        safety++;
+        const x = xmin + Math.random() * (xmax - xmin);
+        const y = ymin + Math.random() * (ymax - ymin);
+        if (!heartInside(x, y)) continue;
+
+        const px = cx + x * scale + (Math.random() - 0.5) * (DPR * 0.8);
+        const py = cy - y * scale + (Math.random() - 0.5) * (DPR * 0.8);
+        out.push({ x: px, y: py });
+      }
+
+      return out;
+    }
+
+    function buildTextTargets(text){
+      const w = canvas.width, h = canvas.height;
+
+      // offscreen canvas buat “mask” text
+      const oc = document.createElement("canvas");
+      oc.width = w;
+      oc.height = h;
+      const octx = oc.getContext("2d");
+
+      // ukuran font adaptif
+      const fontSize = Math.floor(Math.min(w, h) * 0.18);
+      octx.clearRect(0,0,w,h);
+      octx.fillStyle = "rgba(0,0,0,1)";
+      octx.fillRect(0,0,w,h);
+
+      octx.textAlign = "center";
+      octx.textBaseline = "middle";
+      octx.font = `900 ${fontSize}px ${TEXT_FONT_FAMILY}`;
+
+      // Glow palsu biar mask tebel (lebih banyak titik)
+      octx.shadowColor = "rgba(255,255,255,0.9)";
+      octx.shadowBlur = Math.floor(fontSize * 0.08);
+
+      octx.fillStyle = TEXT_FILL_STYLE;
+      octx.fillText(text, w*0.5, h*0.53);
+
+      const img = octx.getImageData(0,0,w,h).data;
+
+      // Ambil titik dari pixel alpha/brightness
+      const pts = [];
+      const step = TEXT_SAMPLE_STEP;
+
+      for (let y = 0; y < h; y += step){
+        for (let x = 0; x < w; x += step){
+          const i = (y*w + x) * 4;
+          const r = img[i];
+          const a = img[i+3];
+          // threshold: pixel putih & kelihatan
+          if (a > 20 && r > 35){
+            // jitter biar natural
+            pts.push({
+              x: x + (Math.random() - 0.5) * step,
+              y: y + (Math.random() - 0.5) * step
+            });
+          }
+        }
+      }
+
+      // Kalau titiknya kebanyakan, sample acak; kalau kurang, ulang pakai modulo
+      const out = [];
+      if (pts.length === 0){
+        // fallback: jangan sampai kosong
+        return buildHeartTargets();
+      }
+
+      for (let i = 0; i < PARTICLE_COUNT; i++){
+        const p = pts[(Math.random() * pts.length) | 0];
+        out.push({ x: p.x, y: p.y });
+      }
+
+      return out;
+    }
+
+    function applyTargetsToParticles(newTargets, firstInit=false){
+      targets = newTargets;
+
+      if (firstInit && particles.length === 0){
+        particles = targets.map(t => new Particle(t.x, t.y));
+        explode(true);
+        return;
+      }
+
+      for (let i = 0; i < particles.length; i++){
+        const t = targets[i % targets.length];
+        particles[i].tx = t.x;
+        particles[i].ty = t.y;
+      }
+    }
+
+    function rebuildTargetsForMode(firstInit=false){
+      if (mode === "heart"){
+        applyTargetsToParticles(buildHeartTargets(), firstInit);
+
+      } else {
+        applyTargetsToParticles(buildTextTargets(TEXT_STRING), firstInit);
+        
+      }
+    }
+
+    class Particle{
+      constructor(tx, ty){
+        this.x = Math.random() * canvas.width;
+        this.y = Math.random() * canvas.height;
+        this.vx = 0;
+        this.vy = 0;
+
+        this.tx = tx;
+        this.ty = ty;
+
+        this.r = 1.0 + Math.random() * 1.8;
+
+        // alpha sedikit variasi
+        this.alpha = 0.34 + Math.random() * 0.50;
+      }
+
+      step(){
+        const dx = this.tx - this.x;
+        const dy = this.ty - this.y;
+        this.vx += dx * ARRIVE_FORCE;
+        this.vy += dy * ARRIVE_FORCE;
+
+        const damp = (mode === "heart" && pointer.insideHeart) ? HOVER_DAMP_BOOST : DAMPING;
+        this.vx *= damp;
+        this.vy *= damp;
+
+        // hover repel hanya saat heart mode
+        if (mode === "heart" && pointer.insideHeart){
+          const pxn = (this.x - heartCX) / heartScale;
+          const pyn = (heartCY - this.y) / heartScale;
+
+          const mxn = (pointer.x - heartCX) / heartScale;
+          const myn = (heartCY - pointer.y) / heartScale;
+
+          const rx = pxn - mxn;
+          const ry = pyn - myn;
+          const dist = Math.hypot(rx, ry) || 1;
+
+          if (dist < HOVER_RADIUS_NORM){
+            const falloff = 1 - (dist / HOVER_RADIUS_NORM);
+            const push = HOVER_REPEL_FORCE * falloff;
+
+            this.vx += (rx / dist) * push * DPR * 3.2;
+            this.vy += (-ry / dist) * push * DPR * 3.2;
+          }
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+      }
+
+      draw(blinkFactor){
+        ctx.globalAlpha = this.alpha * blinkFactor;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.r * DPR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function explode(initial=false){
+      const w = canvas.width, h = canvas.height;
+      const cx = w * 0.5, cy = h * 0.52;
+
+      for (const p of particles){
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        const len = Math.hypot(dx, dy) || 1;
+
+        const ux = dx / len;
+        const uy = dy / len;
+
+        const power = SCATTER_FORCE * (0.55 + Math.random()*0.9);
+        p.vx += ux * power * DPR;
+        p.vy += uy * power * DPR;
+
+        if (initial){
+          p.x = Math.random() * w;
+          p.y = Math.random() * h;
+        }
+      }
+    }
+
+    // pointer tracking + hit-test inside heart
+    window.addEventListener("pointermove", (e) => {
+      pointer.x = e.clientX * DPR;
+      pointer.y = e.clientY * DPR;
+
+      if (mode !== "heart"){
+        pointer.insideHeart = false;
+        return;
+      }
+
+      const mxn = (pointer.x - heartCX) / heartScale;
+      const myn = (heartCY - pointer.y) / heartScale;
+      pointer.insideHeart = heartInside(mxn, myn);
+    });
+
+    window.addEventListener("pointerleave", () => {
+      pointer.insideHeart = false;
+    });
+
+    function gaussianDip(phase, center, width){
+      const d = (phase - center);
+      return Math.exp(-(d*d) / (2 * width * width));
+    }
+
+    function blinkOpacity(t){
+      const phase = (t * BLINK_SPEED) % 1;
+      const dip = gaussianDip(phase, 0.18, BLINK_WIDTH);
+      return 1 - dip * BLINK_STRENGTH;
+    }
+
+    // Triple click logic + explode
+    window.addEventListener("pointerdown", () => {
+      clickCount++;
+
+      if (clickTimer) clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => {
+        clickCount = 0;
+      }, TRIPLE_CLICK_WINDOW_MS);
+
+      if (clickCount >= 3){
+        // TRIPLE CLICK → toggle mode
+        clickCount = 0;
+        clearTimeout(clickTimer);
+        clickTimer = null;
+
+        mode = (mode === "heart") ? "text" : "heart";
+        rebuildTargetsForMode(false);
+        return; // jangan explode
+      }
+
+      // klik biasa → explode
+      explode(false);
+    });
+
+    function tick(nowMs){
+      const t = nowMs * 0.001;
+
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      const blink = blinkOpacity(t);
+
+      for (const p of particles) p.step();
+
+      if (GLOW){
+        // outer glow
+        ctx.save();
+        ctx.shadowBlur = 55 * DPR;
+        ctx.shadowColor = RED_OUTER;
+        ctx.fillStyle = RED_OUTER;
+        for (const p of particles) p.draw(blink);
+        ctx.restore();
+
+        // inner glow
+        ctx.save();
+        ctx.shadowBlur = 26 * DPR;
+        ctx.shadowColor = RED_INNER;
+        ctx.fillStyle = RED_INNER;
+        for (const p of particles) p.draw(blink);
+        ctx.restore();
+      }
+
+      // hot core
+      ctx.fillStyle = HOT_CORE;
+      for (const p of particles) p.draw(blink);
+
+      // main core
+      ctx.fillStyle = RED_MAIN;
+      for (const p of particles) p.draw(blink);
+
+      requestAnimationFrame(tick);
+    }
+
+    // boot
+    resize();
+    rebuildTargetsForMode(true);
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
